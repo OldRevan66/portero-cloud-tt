@@ -1,0 +1,5 @@
+b7ca824b9b75ff46d7711f301247a86c949de5b170a1f6320566f4515d8fbb87 *imagenes/portero-backend-1.0.0.tar
+86f3f17bca56045a878a4676133b1dac727277e4deb738922be365458d9ac5fb *imagenes/portero-frontend-1.0.0.tar
+a9198251c3bc83542eccee86791d39186f691b60594e41187d34bd0ad5693f71 *imagenes/postgres-16.tar
+1224ca8b741a98d14b2f22ebd0662f276b334bf11c4493d2f3684d692a72ade6 *sdk/portero_cloud_sdk-1.0.0-py3-none-any.whl
+ab39e370cb4d7eda9f2bcca6c1fa54ffd6a4497283872ffba47cff8275bf38a3 *sdk/portero_cloud_sdk-1.0.0.tar.gz

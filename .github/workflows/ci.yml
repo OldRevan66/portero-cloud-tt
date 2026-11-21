@@ -1,0 +1,210 @@
+# Integración continua de Portero Cloud (Cap. 6 §Análisis estático y de dependencias; sesión 20).
+# Cuatro jobs: backend, sdk y frontend en paralelo; e2e cuando los tres pasan.
+#
+# Seguridad del propio workflow:
+# - El GITHUB_TOKEN solo puede leer el repositorio, y checkout no lo deja en .git/config.
+# - Las acciones de terceros van fijadas por el SHA de su commit (un tag se puede mover); el
+#   comentario indica la versión.
+# - No se usa ningún secreto del repositorio: la BD de pruebas usa las credenciales desechables
+#   de db-test, y el E2E genera las suyas en cada corrida (H-57).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Cap. 6: pip-audit y npm audit corren "diariamente y en cada construcción". La corrida diaria
+  # detecta una vulnerabilidad recién publicada aunque nadie haya hecho push (13:00 UTC = 07:00 CDMX).
+  schedule:
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Un push nuevo a la misma rama o PR cancela la corrida anterior, que ya quedó vieja.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Ningún `uv run` (tampoco el de frontend/e2e/correr.mjs) re-resuelve uv.lock.
+  UV_FROZEN: "1"
+
+# Runner fijo en ubuntu-24.04, no ubuntu-latest (H-58): ese alias pasa a Ubuntu 26 desde el
+# 19 oct 2026, y `playwright install --with-deps` depende de los paquetes de la distribución.
+# Se cambia a propósito, con una corrida en verde, no por sorpresa antes de la revisión.
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    # El mismo PostgreSQL 16 que db-test en docker-compose.yml, en el mismo puerto y con las
+    # mismas credenciales desechables, que son las que esperan tests/integration/conftest.py.
+    services:
+      postgres:
+        # Mismo digest que db-test (H-64).
+        image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_DB: portero_test
+          POSTGRES_USER: portero
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U portero -d portero_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.21"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - run: uv sync --frozen
+      - name: ruff
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+      # Strict en crypto, rbac, db y oplog (overrides de pyproject.toml); no estricto en el resto.
+      - name: mypy
+        run: uv run mypy src/portero
+      - name: Migraciones
+        env:
+          PORTERO_DATABASE_URL: postgresql+asyncpg://portero:test@localhost:5433/portero_test
+        run: uv run alembic upgrade head
+      - name: pytest con cobertura (≥ 60 % total)
+        run: uv run pytest -q --cov=portero --cov-report=term-missing --cov-fail-under=60
+      # Cada módulo de seguridad por separado: uno bien cubierto no tapa a otro.
+      - name: Cobertura ≥ 80 % en crypto, rbac y oplog
+        run: |
+          for modulo in crypto rbac oplog; do
+            echo "--- portero/$modulo"
+            uv run coverage report --include="*/portero/$modulo/*" --fail-under=80
+          done
+      # pip-audit con uvx y versión fija, no como dependencia de desarrollo: la herramienta queda
+      # fuera del entorno que audita y del uv.lock. Revisa exactamente lo bloqueado (con hashes),
+      # incluidas las dependencias de desarrollo, que también corren aquí.
+      - name: pip-audit
+        run: |
+          uv export --frozen --all-groups --no-emit-project --format requirements-txt \
+            -o "$RUNNER_TEMP/requirements-backend.txt"
+          uvx pip-audit@2.10.1 -r "$RUNNER_TEMP/requirements-backend.txt" --require-hashes --disable-pip
+
+  sdk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: sdk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.21"
+          enable-cache: true
+          cache-dependency-glob: sdk/uv.lock
+      - run: uv sync --frozen
+      - name: ruff
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+      - name: mypy --strict
+        run: uv run mypy src tests
+      # Los "vivo" necesitan el stack de desarrollo con seed; aquí se excluyen explícitamente.
+      - name: pytest con cobertura (≥ 80 %)
+        run: >-
+          uv run pytest -q -m "not vivo" --cov=portero_cloud_sdk --cov-report=term-missing
+          --cov-fail-under=80
+      - name: pip-audit
+        run: |
+          uv export --frozen --all-groups --no-emit-project --format requirements-txt \
+            -o "$RUNNER_TEMP/requirements-sdk.txt"
+          uvx pip-audit@2.10.1 -r "$RUNNER_TEMP/requirements-sdk.txt" --require-hashes --disable-pip
+
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: ESLint (incluye tsc -p e2e)
+        run: npm run lint
+      - name: Prettier
+        run: npx prettier --check .
+      - name: Vitest
+        run: npm test
+      - name: Build (tsc --noEmit + vite build)
+        run: npm run build
+      # Nivel moderate, incluidas las devDependencies (H-51): lo que obligó a subir a Vite 6 y
+      # Vitest 4 estaba en dependencias de desarrollo y una era moderada (esbuild). Con "high"
+      # esa clase de vulnerabilidad pasaría; las "low" no rompen el job, para que no haga ruido.
+      - name: npm audit
+        run: npm audit --audit-level=moderate
+
+  e2e:
+    needs: [backend, sdk, frontend]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # correr.mjs genera las credenciales con `uv run` en backend/.
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.21"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Chromium de Playwright (con dependencias del sistema)
+        run: npx playwright install --with-deps chromium
+      - name: Dependencias del backend
+        working-directory: backend
+        run: uv sync --frozen
+      # Stack portero-e2e desechable: credenciales al vuelo → up → Playwright → down -v.
+      - name: npm run e2e
+        run: npm run e2e
+      # H-79: solo un proxy declarado en PORTERO_TRUSTED_PROXY fija la IP del cliente; un
+      # X-Forwarded-For de otro origen se sigue ignorando (spec §7). Stack desechable propio.
+      - name: npm run prueba:nginx
+        run: npm run prueba:nginx
+      # Solo si falla. Los traces pueden contener contraseñas y tokens del stack desechable, pero
+      # ese stack existió solo dentro de este runner, murió con el down -v y sus datos son demo
+      # (H-57). Se conservan 7 días.
+      - name: Reporte de Playwright
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 7
+          if-no-files-found: ignore

@@ -1,0 +1,72 @@
+# Stack desechable para probar la IP real del cliente en el nginx del Dashboard (H-79, spec §7).
+# Lo levanta y lo baja `npm run prueba:nginx` (realip.mjs); no usa .env ni la base de datos.
+#
+# - frontend*: la imagen real del Dashboard (frontend/Dockerfile), con el mismo endurecimiento
+#   que en docker-compose.yml (solo lectura, /tmp en tmpfs, sin capacidades).
+# - backend: un nginx que responde con el X-Forwarded-For que le llega, es decir, la IP que el
+#   backend real tomaría como la del cliente (H-53).
+# - proxy y otro: clientes con IP fija. "proxy" hace de proxy con TLS declarado; "otro" es
+#   cualquier otro origen de la red.
+name: portero-realip
+
+x-frontend: &frontend
+  build: ..
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  restart: "no"
+
+x-cliente: &cliente
+  image: nginxinc/nginx-unprivileged:1.28-alpine@sha256:7377697a821c131a924a7105fafbe7414db4e9fcc77a6f08f776f33f141ec3f8
+  entrypoint: ["sleep", "3600"]
+
+services:
+  # Proxy declarado: debe tomar la IP del cliente del X-Forwarded-For que manda 10.250.79.20.
+  frontend:
+    <<: *frontend
+    environment:
+      PORTERO_TRUSTED_PROXY: 10.250.79.20
+
+  # Sin la variable: el comportamiento de hoy (X-Forwarded-For del cliente siempre ignorado).
+  frontend-sin-proxy:
+    <<: *frontend
+
+  # Un valor que intenta inyectar directivas: el contenedor no debe arrancar.
+  frontend-invalido:
+    <<: *frontend
+    environment:
+      PORTERO_TRUSTED_PROXY: "10.0.0.1; include /etc/passwd"
+
+  # H-85: saltos de línea. Solo la última línea parece un CIDR; si se aceptara, nginx confiaría
+  # en el X-Forwarded-For de cualquier origen (set_real_ip_from 0.0.0.0/0). No debe arrancar.
+  frontend-salto:
+    <<: *frontend
+    environment:
+      PORTERO_TRUSTED_PROXY: "10.0.0.1;\nset_real_ip_from\n0.0.0.0/0"
+
+  backend:
+    image: nginxinc/nginx-unprivileged:1.28-alpine@sha256:7377697a821c131a924a7105fafbe7414db4e9fcc77a6f08f776f33f141ec3f8
+    volumes:
+      - ./eco.conf:/etc/nginx/conf.d/default.conf:ro
+
+  proxy:
+    <<: *cliente
+    networks:
+      default:
+        ipv4_address: 10.250.79.20
+
+  otro:
+    <<: *cliente
+    networks:
+      default:
+        ipv4_address: 10.250.79.30
+
+# Las IP dinámicas salen de la mitad alta para no chocar con las fijas de los clientes.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.250.79.0/24
+          ip_range: 10.250.79.128/25

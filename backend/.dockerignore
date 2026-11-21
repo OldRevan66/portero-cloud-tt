@@ -1,0 +1,11 @@
+# Solo pyproject.toml, uv.lock y src/ entran en la imagen.
+.venv/
+.env
+.env.*
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+tests/

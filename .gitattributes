@@ -1,2 +1,5 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Finales de línea LF en todo el repositorio (el código corre en contenedores Linux)
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.png binary
+*.pdf binary

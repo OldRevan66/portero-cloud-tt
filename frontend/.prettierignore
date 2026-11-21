@@ -1,0 +1,7 @@
+dist
+node_modules
+package-lock.json
+src/api/schema.d.ts
+e2e/.generado
+playwright-report
+test-results

@@ -1,0 +1,38 @@
+# Secretos y configuración local (NUNCA al repositorio)
+.env
+.env.*
+!.env.example
+/secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Frontend (Node)
+node_modules/
+# Pruebas E2E: entorno generado en cada corrida (secretos desechables) y resultados de Playwright
+frontend/e2e/.generado/
+frontend/playwright-report/
+frontend/test-results/
+
+# Herramientas
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Editores y sistema operativo
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Imágenes Docker exportadas (cientos de MB; se publican como archivos del Release, no en Git)
+ejecutables/imagenes/

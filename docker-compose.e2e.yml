@@ -1,0 +1,87 @@
+# Stack E2E de Portero Cloud (Cap. 6 §Pruebas end-to-end del Dashboard; H-57). Se superpone a
+# docker-compose.yml y lo levanta `npm run e2e` (frontend/e2e/correr.mjs); no se usa a mano:
+#
+#   docker compose -p portero-e2e -f docker-compose.yml -f docker-compose.e2e.yml \
+#     --env-file frontend/e2e/.generado/e2e.env up -d --build --wait frontend
+#
+# Convive con el stack de desarrollo: otro nombre de proyecto (contenedores, red y volúmenes
+# propios), Dashboard en 127.0.0.1:8180 y otra subred. --env-file sustituye al .env de desarrollo
+# para la interpolación: aquí nunca se lee .env. Los secretos de ese archivo se generan en cada
+# corrida (backend/scripts/generate_e2e_env.py) y no se versionan.
+services:
+  # BD limpia en cada corrida: en RAM y sin publicar puertos (solo la ven preparar y backend).
+  db:
+    ports: !reset []
+    volumes: !reset []
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  # Una sola vez: migración y seed dentro del stack, nunca contra la BD de desarrollo. Usa la
+  # imagen del backend y monta de solo lectura lo que esa imagen no lleva (Alembic y scripts), así
+  # la imagen de producción no cambia.
+  preparar:
+    build: ./backend
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && python scripts/seed_demo.py --contrasenas-del-entorno
+    environment:
+      PORTERO_DATABASE_URL: postgresql+asyncpg://portero:${POSTGRES_PASSWORD}@db:5432/portero
+      PORTERO_KEK_PASSPHRASE: ${PORTERO_KEK_PASSPHRASE}
+      PORTERO_JWT_PRIVATE_KEY: ${PORTERO_JWT_PRIVATE_KEY}
+      PORTERO_JWT_ISSUER: http://localhost:8180
+      SEED_PASSWORD_ADMIN: ${SEED_PASSWORD_ADMIN}
+      SEED_PASSWORD_LIDER: ${SEED_PASSWORD_LIDER}
+      SEED_PASSWORD_DEV: ${SEED_PASSWORD_DEV}
+    volumes:
+      - ./backend/alembic:/app/alembic:ro
+      - ./backend/alembic.ini:/app/alembic.ini:ro
+      - ./backend/scripts:/app/scripts:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    # Corre una vez y termina: el HEALTHCHECK de la imagen del backend (H-63) no aplica.
+    healthcheck:
+      disable: true
+    ulimits:
+      core: 0
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  # Solo las variables que necesita (sin .env); las del seed no le llegan.
+  backend:
+    env_file: !reset []
+    environment:
+      PORTERO_DATABASE_URL: postgresql+asyncpg://portero:${POSTGRES_PASSWORD}@db:5432/portero
+      PORTERO_KEK_PASSPHRASE: ${PORTERO_KEK_PASSPHRASE}
+      PORTERO_JWT_PRIVATE_KEY: ${PORTERO_JWT_PRIVATE_KEY}
+      PORTERO_JWT_ISSUER: http://localhost:8180
+      PORTERO_ALLOWED_ORIGINS: '["http://localhost:8180"]'
+      PORTERO_DOCS_ENABLED: "false"
+      # H-56: todas las peticiones de Playwright llegan desde la IP del gateway de Docker; con el
+      # límite del Cap. 6 (10/min) la suite recibiría 429. Ese límite lo prueban las de integración.
+      PORTERO_RATE_LIMIT_AUTH_PER_MINUTE: "600"
+      # H-53: cambia junto con la IP de nginx de abajo.
+      FORWARDED_ALLOW_IPS: 172.30.251.10
+    ports: !reset []
+    depends_on:
+      preparar:
+        condition: service_completed_successfully
+
+  frontend:
+    ports: !override
+      - "127.0.0.1:8180:8080"
+      - "[::1]:8180:8080"
+    networks:
+      default:
+        ipv4_address: 172.30.251.10
+
+# Otra subred que la de desarrollo (172.30.250.0/24): dos redes con la misma subred no pueden
+# coexistir (H-53: la red y FORWARDED_ALLOW_IPS cambian a la vez).
+networks:
+  default:
+    ipam:
+      config: !override
+        - subnet: 172.30.251.0/24

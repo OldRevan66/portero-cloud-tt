@@ -1,0 +1,14 @@
+# Lo que no entra al contexto de construcción de la imagen del Dashboard.
+node_modules
+dist
+coverage
+*.log
+.env
+.env.*
+Dockerfile
+.dockerignore
+e2e
+playwright-report
+test-results
+playwright.config.ts
+pruebas-nginx

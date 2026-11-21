@@ -1,0 +1,29 @@
+# Dependabot (H-64; OWASP ASVS V14.2.1): propone PR semanales para que no envejezcan las versiones
+# fijadas a propósito (acciones por SHA, imágenes por digest, uv.lock y package-lock.json). Cada PR
+# pasa por la CI completa (incluidos pip-audit y npm audit) antes de fusionarse a mano.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directories:
+      - /backend
+      - /frontend
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: uv
+    directories:
+      - /backend
+      - /sdk
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly

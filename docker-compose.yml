@@ -1,0 +1,136 @@
+# Portero Cloud — entorno de desarrollo y despliegue.
+#   docker compose up -d db db-test   -> solo bases de datos (el backend corre con uv en Windows)
+#   docker compose up --build         -> todo el sistema en contenedores
+#                                        (Dashboard en http://localhost:8080)
+#
+# Endurecimiento (H-63, CIS Docker): sin escalada de privilegios (5.25), límites de memoria y de
+# procesos (5.10, 5.28) para que un servicio desbocado no tumbe al host, y sistema de archivos de
+# solo lectura donde la imagen lo permite (5.12). Las imágenes van fijadas por digest (H-64).
+services:
+  db:
+    image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+    environment:
+      POSTGRES_DB: portero
+      POSTGRES_USER: portero
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD en .env (copia .env.example)}
+    # 5434 en el host: el 5432 suele estar ocupado por un PostgreSQL instalado en Windows.
+    # Solo en loopback (IPv4 e IPv6): la base no queda expuesta a la red local (H-33; CIS
+    # Docker 5.13). Se publica también en [::1] porque en Windows "localhost" resuelve primero a
+    # ::1 y, sin él, cada conexión espera ~2 s a que falle IPv6 antes de reintentar por IPv4.
+    ports:
+      - "127.0.0.1:5434:5432"
+      - "[::1]:5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portero -d portero"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Sin cap_drop: ALL: el entrypoint de postgres arranca como root para preparar el directorio
+    # de datos (chown) y luego baja al usuario postgres; no ejecuta binarios setuid.
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    pids_limit: 256
+
+  # Base para pruebas de integración: datos en RAM, se pierden al apagar. Credenciales desechables.
+  db-test:
+    image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+    environment:
+      POSTGRES_DB: portero_test
+      POSTGRES_USER: portero
+      POSTGRES_PASSWORD: test
+    ports:
+      - "127.0.0.1:5433:5432"
+      - "[::1]:5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portero -d portero_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    pids_limit: 256
+
+  backend:
+    build: ./backend
+    image: portero-cloud-backend:1.0.0
+    env_file: .env
+    environment:
+      # Dentro de la red de Compose la BD se llama "db", no localhost.
+      PORTERO_DATABASE_URL: postgresql+asyncpg://portero:${POSTGRES_PASSWORD}@db:5432/portero
+      # uvicorn (ProxyHeadersMiddleware) solo acepta X-Forwarded-For de esta IP: la fija de
+      # nginx en la red de Compose. Así request.client.host es la IP real del cliente para el
+      # límite de login y la bitácora (H-53). Una petición directa al 8000 no viene de esa IP y
+      # su X-Forwarded-For se ignora (spec §7: no se confía en él sin un proxy declarado).
+      FORWARDED_ALLOW_IPS: 172.30.250.10
+      # Nivel de los logs JSON (H-70; OWASP ASVS V7.1). El stack E2E hereda esta línea.
+      PORTERO_LOG_LEVEL: ${PORTERO_LOG_LEVEL:-INFO}
+    # Solo en loopback, como la BD (H-33): Swagger, curl y el SDK desde esta máquina.
+    ports:
+      - "127.0.0.1:8000:8000"
+      - "[::1]:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Endurecimiento exclusivo de Linux (Cap. 6): sin volcados de memoria (RLIMIT_CORE=0),
+    # sin escalada de privilegios y sin capacidades del kernel. El UID 10001 lo fija el Dockerfile.
+    ulimits:
+      core: 0
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Solo lectura: el backend no escribe en disco (PYTHONDONTWRITEBYTECODE en el Dockerfile);
+    # /tmp en memoria por si una biblioteca necesita un temporal. 512 MiB: cada hash Argon2id
+    # usa ~19 MiB (m=19456 KiB) y el login admite 10 por minuto por IP.
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 512m
+    pids_limit: 128
+
+  # Dashboard Web: nginx sin privilegios (UID 101) con la SPA compilada y proxy de /api al
+  # backend (mismo origen, H-36). Cabeceras de seguridad en frontend/security-headers.conf.
+  frontend:
+    build: ./frontend
+    image: portero-cloud-frontend:1.0.0
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "[::1]:8080:8080"
+    networks:
+      default:
+        # IP fija: es la única de la que el backend acepta X-Forwarded-For (H-53).
+        ipv4_address: 172.30.250.10
+    environment:
+      # H-79: IP o CIDR del proxy con TLS de confianza (separadas por comas). Vacía: nginx ignora
+      # todo X-Forwarded-For, como siempre. Ver la guía de instalación, sección 6.3.
+      PORTERO_TRUSTED_PROXY: ${PORTERO_TRUSTED_PROXY:-}
+    # Espera a que la API responda (HEALTHCHECK del Dockerfile del backend, H-63).
+    depends_on:
+      backend:
+        condition: service_healthy
+    # Sistema de archivos de solo lectura: nginx solo escribe sus temporales en /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 128m
+    pids_limit: 64
+
+# Subred fija de la red de Compose para poder fijar la IP de nginx (H-53).
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.250.0/24
+
+volumes:
+  pgdata:
